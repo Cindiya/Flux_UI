@@ -1,6 +1,13 @@
 'use client'
 
-import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
+import {
+  FormEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import {
   api,
   calculateMockScenario,
@@ -464,6 +471,662 @@ function ApiStatus({
   return null
 }
 
+function FinancialCompanion({
+  finance,
+  onClose,
+}: {
+  finance: FinanceProfile
+  onClose: () => void
+}) {
+  const vehicles = [
+    {
+      name: '2026 Toyota Corolla LE',
+      price: 24500,
+      label: 'Current listing',
+      mileage: '8 miles',
+      color: 'Ice Cap',
+    },
+    {
+      name: '2025 Toyota Corolla L',
+      price: 21900,
+      label: 'Lower-price match',
+      mileage: '4,210 miles',
+      color: 'Classic Silver',
+    },
+    {
+      name: '2026 Toyota Camry SE',
+      price: 28900,
+      label: 'Higher-price match',
+      mileage: '12 miles',
+      color: 'Wind Chill Pearl',
+    },
+  ]
+  const [vehicleIndex, setVehicleIndex] = useState(0)
+  const [collapsed, setCollapsed] = useState(false)
+  const [mobileSheetExpanded, setMobileSheetExpanded] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [snapshotExpanded, setSnapshotExpanded] = useState(true)
+  const [breakdownExpanded, setBreakdownExpanded] = useState(false)
+  const [companionChatOpen, setCompanionChatOpen] = useState(false)
+  const [companionChatInput, setCompanionChatInput] = useState('')
+  const [companionChat, setCompanionChat] = useState<{ from: 'ai' | 'user'; text: string }[]>([])
+  const [assumptions, setAssumptions] = useState({
+    down: 3500,
+    apr: 6.2,
+    term: 60,
+    insurance: 148,
+    running: 172,
+    fees: 950,
+  })
+  const companionPanelRef = useRef<HTMLElement>(null)
+  const sheetDragRef = useRef<{
+    startY: number
+    startHeight: number
+    currentHeight: number
+    moved: boolean
+  } | null>(null)
+
+  const vehicle = vehicles[vehicleIndex]
+  const scenario: SimulatorData = {
+    ...initialSimulator,
+    price: vehicle.price,
+    down: assumptions.down,
+    apr: assumptions.apr,
+    term: assumptions.term,
+    insurance: assumptions.insurance,
+    running: assumptions.running,
+    fees: assumptions.fees,
+  }
+  const estimate = loanDetails(scenario)
+  const availableBeforeCar = finance.income - finance.housing - finance.expenses - finance.debt
+  const remainingMonthly = availableBeforeCar - estimate.totalMonthly
+  const savingsRemaining = Math.max(finance.savings - estimate.upfront, 0)
+  const essentialMonthly = finance.housing + finance.expenses + finance.debt
+  const cushionMonths = essentialMonthly ? savingsRemaining / essentialMonthly : 0
+  const fuel = 105
+  const maintenance = Math.max(assumptions.running - fuel, 0)
+
+  const selectVehicle = (index: number) => {
+    setVehicleIndex(index)
+    setSnapshotExpanded(true)
+  }
+
+  const sendCompanionMessage = (question: string) => {
+    const prompt = question.trim()
+    if (!prompt) return
+    const normalized = prompt.toLowerCase()
+    let response = `This ${vehicle.name} is estimated at ${money(estimate.totalMonthly)} per month including the payment, insurance, fuel, and maintenance. That could leave about ${money(remainingMonthly)} after the recurring expenses in your example profile.`
+    if (normalized.includes('cheaper'))
+      response = `The lower-price Corolla reduces the estimated total by about ${money(Math.max(estimate.totalMonthly - loanDetails({ ...scenario, price: vehicles[1].price }).totalMonthly, 0))} per month. I can update the listing and snapshot without changing your saved financial profile.`
+    if (normalized.includes('wait'))
+      response = `Waiting three months and setting aside ${money(Math.min(Math.max(availableBeforeCar * 0.25, 0), 250))} per month could add to your down payment, though the vehicle price and rate could change.`
+    if (normalized.includes('afford'))
+      response = `I can’t determine affordability for you, but I can show the tradeoff: this estimate uses ${money(estimate.totalMonthly)} of your ${money(availableBeforeCar)} monthly room before additional or unexpected spending.`
+    if (normalized.includes('compare'))
+      response = `The current listing is ${money(vehicle.price)}. The lower-price match is ${money(vehicles[1].price)}, and the higher-price match is ${money(vehicles[2].price)}. Select either suggestion to quietly refresh the full estimate.`
+    setCompanionChat((messages) => [
+      ...messages,
+      { from: 'user', text: prompt },
+      { from: 'ai', text: response },
+    ])
+    setCompanionChatInput('')
+    setCompanionChatOpen(true)
+  }
+
+  const submitCompanionChat = (event: FormEvent) => {
+    event.preventDefault()
+    sendCompanionMessage(companionChatInput)
+  }
+
+  const toggleCompanionPanel = () => {
+    if (window.matchMedia('(max-width: 900px)').matches) {
+      setMobileSheetExpanded((value) => !value)
+      return
+    }
+    setCollapsed((value) => !value)
+  }
+
+  const startSheetDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const panel = companionPanelRef.current
+    if (!panel || !window.matchMedia('(max-width: 900px)').matches) return
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const startHeight = panel.getBoundingClientRect().height
+    sheetDragRef.current = {
+      startY: event.clientY,
+      startHeight,
+      currentHeight: startHeight,
+      moved: false,
+    }
+    panel.classList.add('dragging')
+  }
+
+  const moveSheetDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const panel = companionPanelRef.current
+    const drag = sheetDragRef.current
+    if (!panel || !drag) return
+    const delta = drag.startY - event.clientY
+    const nextHeight = Math.min(
+      window.innerHeight * 0.92,
+      Math.max(window.innerHeight * 0.2, drag.startHeight + delta),
+    )
+    drag.currentHeight = nextHeight
+    drag.moved = drag.moved || Math.abs(delta) > 5
+    panel.style.height = `${nextHeight}px`
+  }
+
+  const finishSheetDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const panel = companionPanelRef.current
+    const drag = sheetDragRef.current
+    if (!panel || !drag) return
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    const shouldExpand = drag.moved
+      ? drag.currentHeight > window.innerHeight * 0.45
+      : !mobileSheetExpanded
+    panel.style.height = ''
+    panel.classList.remove('dragging')
+    sheetDragRef.current = null
+    setMobileSheetExpanded(shouldExpand)
+  }
+
+  return (
+    <div
+      className={`shopping-extension-host ${collapsed ? 'companion-collapsed' : ''} ${
+        mobileSheetExpanded ? 'mobile-sheet-expanded' : ''
+      }`}
+    >
+      <section className="toyota-shopping-page" aria-label="Demo Toyota shopping page">
+        <header className="toyota-site-header">
+          <button className="toyota-wordmark" onClick={onClose}>
+            TOYOTA
+          </button>
+          <nav aria-label="Vehicle shopping">
+            <span>Vehicles</span>
+            <span>Shopping tools</span>
+            <span>Local inventory</span>
+          </nav>
+          <button className="toyota-location">
+            <Icon name="compass" size={16} /> Near you
+          </button>
+        </header>
+
+        <div className="toyota-search-strip">
+          <div>
+            <span className="toyota-search-label">Search inventory</span>
+            <strong>Toyota Corolla</strong>
+          </div>
+          <div className="toyota-filter-row" aria-label="Active vehicle filters">
+            <span className="active">Under $25,000</span>
+            <span>Corolla</span>
+            <span>Sedan</span>
+            <span>New &amp; recent</span>
+          </div>
+          <button>
+            <Icon name="sliders" size={18} /> Filters <b>4</b>
+          </button>
+        </div>
+
+        <main className="toyota-listing-shell">
+          <div className="toyota-results-heading">
+            <div>
+              <span>Lower-price matches</span>
+              <h1>{vehicle.name}</h1>
+              <p>Available near you · Mock Toyota inventory</p>
+            </div>
+            <button aria-label="Save this vehicle">Save</button>
+          </div>
+
+          <div className="toyota-listing-grid">
+            <div className="toyota-car-gallery">
+              <img src="/toyota-corolla.jpg" alt={`White sedan representing the ${vehicle.name}`} />
+              <span>1 / 8</span>
+              <small>Photo by lens zone on Unsplash</small>
+            </div>
+            <article className="toyota-purchase-card">
+              <span className="toyota-match-pill">{vehicle.label}</span>
+              <p>Starting MSRP</p>
+              <strong>{money(vehicle.price)}</strong>
+              <div className="toyota-vehicle-facts">
+                <span>
+                  <small>Mileage</small>
+                  {vehicle.mileage}
+                </span>
+                <span>
+                  <small>Exterior</small>
+                  {vehicle.color}
+                </span>
+              </div>
+              <button className="toyota-primary-action">Check availability</button>
+              <button className="toyota-secondary-action">Estimate payments</button>
+              <p className="toyota-fine-print">
+                Demo listing only. Price excludes taxes, registration, and dealer charges.
+              </p>
+            </article>
+          </div>
+
+          <section className="toyota-details-section">
+            <div>
+              <span>Corolla highlights</span>
+              <h2>Efficient, practical, and ready for everyday driving.</h2>
+            </div>
+            <div className="toyota-feature-grid">
+              <article>
+                <Icon name="leaf" />
+                <strong>Up to 35 MPG combined</strong>
+                <span>Manufacturer estimate</span>
+              </article>
+              <article>
+                <Icon name="shield" />
+                <strong>Toyota Safety Sense</strong>
+                <span>Driver-assistance features</span>
+              </article>
+              <article>
+                <Icon name="spark" />
+                <strong>Wireless smartphone support</strong>
+                <span>Connected on every trip</span>
+              </article>
+            </div>
+          </section>
+
+          <section className="toyota-more-results">
+            <div>
+              <h2>More lower-price Corolla options</h2>
+              <span>Filtered under $25,000</span>
+            </div>
+            <div>
+              {vehicles.slice(0, 2).map((option, index) => (
+                <button key={option.name} onClick={() => selectVehicle(index)}>
+                  <img src="/toyota-corolla.jpg" alt="" />
+                  <span>
+                    <strong>{option.name}</strong>
+                    <small>{option.mileage}</small>
+                  </span>
+                  <b>{money(option.price)}</b>
+                </button>
+              ))}
+            </div>
+          </section>
+        </main>
+      </section>
+
+      <aside
+        ref={companionPanelRef}
+        className="financial-companion-panel"
+        aria-label="Flux Financial Companion"
+      >
+        <button
+          className="companion-drag-handle"
+          aria-label={
+            mobileSheetExpanded ? 'Collapse financial summary' : 'Expand financial details'
+          }
+          onPointerDown={startSheetDrag}
+          onPointerMove={moveSheetDrag}
+          onPointerUp={finishSheetDrag}
+          onPointerCancel={finishSheetDrag}
+        >
+          <span />
+        </button>
+        <header className="companion-panel-header">
+          <div className="companion-panel-brand">
+            <span>
+              <img src={fluxLogo} alt="" />
+            </span>
+            <div>
+              <strong>Financial Companion</strong>
+              <small>
+                <i /> Analyzing this car
+              </small>
+            </div>
+          </div>
+          <div className="companion-panel-controls">
+            <button
+              onClick={toggleCompanionPanel}
+              aria-label="Toggle Financial Companion"
+              title={collapsed ? 'Expand panel' : 'Collapse panel'}
+            >
+              <Icon name={collapsed ? 'back' : 'chevron'} size={17} />
+            </button>
+            <button
+              onClick={() => setMenuOpen((value) => !value)}
+              aria-label="Open companion menu"
+              aria-expanded={menuOpen}
+            >
+              <span className="companion-more">•••</span>
+            </button>
+          </div>
+          {menuOpen && !collapsed && (
+            <div className="companion-menu">
+              <button onClick={() => setBreakdownExpanded(true)}>Edit assumptions</button>
+              <button onClick={() => setCompanionChatOpen(true)}>Open AI chat</button>
+              <button onClick={onClose}>Close companion</button>
+            </div>
+          )}
+        </header>
+
+        {!collapsed && (
+          <section className="mobile-companion-summary" aria-label="Financial snapshot summary">
+            <div>
+              <span>{vehicle.name}</span>
+              <strong>
+                {money(estimate.totalMonthly)}
+                <small>/month estimated</small>
+              </strong>
+            </div>
+            <div>
+              <span>Remaining</span>
+              <strong>{money(remainingMonthly)}</strong>
+            </div>
+          </section>
+        )}
+
+        {!collapsed && (
+          <div className="companion-scroll">
+            <section className="companion-vehicle-card">
+              <img src="/toyota-corolla.jpg" alt="" />
+              <div>
+                <span>{vehicle.label}</span>
+                <strong>{vehicle.name}</strong>
+                <b>{money(vehicle.price)}</b>
+                <small>
+                  <i /> Analyzing the listing open in this tab
+                </small>
+              </div>
+            </section>
+
+            <section className="companion-section companion-snapshot">
+              <button
+                className="companion-section-heading"
+                onClick={() => setSnapshotExpanded((value) => !value)}
+                aria-expanded={snapshotExpanded}
+              >
+                <span>
+                  <small>Financial snapshot</small>
+                  <strong>How this car could affect your finances</strong>
+                </span>
+                <Icon name="chevron" size={17} />
+              </button>
+              {snapshotExpanded && (
+                <>
+                  <div className="companion-primary-metric">
+                    <span>Total estimated monthly car cost</span>
+                    <strong>{money(estimate.totalMonthly)}</strong>
+                    <small>Payment + insurance + fuel + maintenance</small>
+                  </div>
+                  <div className="companion-metric-grid">
+                    <div>
+                      <span>Car payment</span>
+                      <strong>{money(estimate.payment)}</strong>
+                    </div>
+                    <div>
+                      <span>Insurance</span>
+                      <strong>{money(assumptions.insurance)}</strong>
+                    </div>
+                    <div>
+                      <span>Fuel + maintenance</span>
+                      <strong>{money(assumptions.running)}</strong>
+                    </div>
+                    <div className="accent">
+                      <span>Monthly money remaining</span>
+                      <strong>{money(remainingMonthly)}</strong>
+                    </div>
+                    <div>
+                      <span>Savings after purchase</span>
+                      <strong>{money(savingsRemaining)}</strong>
+                    </div>
+                    <div>
+                      <span>Emergency cushion</span>
+                      <strong>{cushionMonths.toFixed(1)} months</strong>
+                    </div>
+                  </div>
+                  <div className="companion-ai-insight">
+                    <Icon name="spark" size={17} />
+                    <p>
+                      This car could fit within your example monthly budget, but it may leave less
+                      room for your savings goal.
+                    </p>
+                  </div>
+                  <p className="companion-estimate-note">
+                    Illustrative estimates only—not guaranteed loan terms or financial advice.
+                  </p>
+                </>
+              )}
+            </section>
+
+            <section className="companion-section companion-options">
+              <div className="companion-copy-heading">
+                <span>Want to explore other options?</span>
+                <small>The listing and snapshot update quietly when you choose.</small>
+              </div>
+              <button
+                className={vehicleIndex === 1 ? 'selected' : ''}
+                onClick={() => selectVehicle(1)}
+              >
+                <span className="companion-option-icon cheaper">
+                  <Icon name="leaf" size={18} />
+                </span>
+                <span>
+                  <strong>Explore a cheaper car</strong>
+                  <small>Save about $85/month</small>
+                </span>
+                <b>Explore cheaper</b>
+              </button>
+              <button
+                className={vehicleIndex === 2 ? 'selected' : ''}
+                onClick={() => selectVehicle(2)}
+              >
+                <span className="companion-option-icon higher">
+                  <Icon name="chart" size={18} />
+                </span>
+                <span>
+                  <strong>Explore a more expensive car</strong>
+                  <small>Costs about $120 more/month</small>
+                </span>
+                <b>Explore higher</b>
+              </button>
+            </section>
+
+            <section className="companion-section companion-breakdown">
+              <button
+                className="companion-section-heading"
+                onClick={() => setBreakdownExpanded((value) => !value)}
+                aria-expanded={breakdownExpanded}
+              >
+                <span>
+                  <small>Assumptions &amp; details</small>
+                  <strong>View full financial breakdown</strong>
+                </span>
+                <Icon name="chevron" size={17} />
+              </button>
+              {breakdownExpanded && (
+                <div className="companion-breakdown-content">
+                  <dl>
+                    <div>
+                      <dt>Vehicle price</dt>
+                      <dd>{money(vehicle.price)}</dd>
+                    </div>
+                    <div>
+                      <dt>Estimated loan amount</dt>
+                      <dd>{money(Math.max(vehicle.price - assumptions.down, 0))}</dd>
+                    </div>
+                    <div>
+                      <dt>Estimated monthly payment</dt>
+                      <dd>{money(estimate.payment)}</dd>
+                    </div>
+                    <div>
+                      <dt>Estimated insurance</dt>
+                      <dd>{money(assumptions.insurance)}</dd>
+                    </div>
+                    <div>
+                      <dt>Fuel and maintenance</dt>
+                      <dd>
+                        {money(fuel)} + {money(maintenance)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Total monthly cost</dt>
+                      <dd>{money(estimate.totalMonthly)}</dd>
+                    </div>
+                    <div>
+                      <dt>Remaining monthly cash flow</dt>
+                      <dd>{money(remainingMonthly)}</dd>
+                    </div>
+                    <div>
+                      <dt>Savings impact</dt>
+                      <dd>−{money(estimate.upfront)}</dd>
+                    </div>
+                  </dl>
+                  <div className="companion-assumption-fields">
+                    <label>
+                      Down payment
+                      <input
+                        type="number"
+                        min="0"
+                        value={assumptions.down}
+                        onChange={(event) =>
+                          setAssumptions((values) => ({
+                            ...values,
+                            down: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      APR %
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={assumptions.apr}
+                        onChange={(event) =>
+                          setAssumptions((values) => ({
+                            ...values,
+                            apr: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Term (months)
+                      <input
+                        type="number"
+                        min="12"
+                        value={assumptions.term}
+                        onChange={(event) =>
+                          setAssumptions((values) => ({
+                            ...values,
+                            term: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Insurance / month
+                      <input
+                        type="number"
+                        min="0"
+                        value={assumptions.insurance}
+                        onChange={(event) =>
+                          setAssumptions((values) => ({
+                            ...values,
+                            insurance: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Fuel + maintenance
+                      <input
+                        type="number"
+                        min="0"
+                        value={assumptions.running}
+                        onChange={(event) =>
+                          setAssumptions((values) => ({
+                            ...values,
+                            running: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Fees
+                      <input
+                        type="number"
+                        min="0"
+                        value={assumptions.fees}
+                        onChange={(event) =>
+                          setAssumptions((values) => ({
+                            ...values,
+                            fees: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+                  <p>
+                    Assumptions use a fixed-rate estimate and the example financial profile. Taxes,
+                    dealer charges, rate changes, and unexpected costs may change the result.
+                  </p>
+                </div>
+              )}
+            </section>
+
+            <section
+              className={`companion-section companion-chat ${companionChatOpen ? 'open' : ''}`}
+            >
+              <div className="companion-chat-heading">
+                <span className="companion-chat-avatar">
+                  <Icon name="spark" size={16} />
+                </span>
+                <p>Want to see how this car fits your financial picture?</p>
+                {!companionChatOpen && (
+                  <button onClick={() => setCompanionChatOpen(true)}>Open chat</button>
+                )}
+              </div>
+              {companionChatOpen && (
+                <>
+                  {companionChat.length > 0 && (
+                    <div className="companion-chat-thread">
+                      {companionChat.map((message, index) => (
+                        <p key={`${message.from}-${index}`} className={message.from}>
+                          {message.text}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                  <div className="companion-question-chips">
+                    {[
+                      'Can I afford this car?',
+                      'What if I wait 3 months?',
+                      'Show me a cheaper option',
+                      'Compare another car',
+                    ].map((question) => (
+                      <button key={question} onClick={() => sendCompanionMessage(question)}>
+                        {question}
+                      </button>
+                    ))}
+                  </div>
+                  <form onSubmit={submitCompanionChat}>
+                    <input
+                      value={companionChatInput}
+                      onChange={(event) => setCompanionChatInput(event.target.value)}
+                      placeholder="Ask Flux about this car…"
+                      aria-label="Ask Flux about this car"
+                    />
+                    <button aria-label="Send message">
+                      <Icon name="send" size={17} />
+                    </button>
+                  </form>
+                </>
+              )}
+            </section>
+          </div>
+        )}
+      </aside>
+    </div>
+  )
+}
+
 function App() {
   const [screen, setScreen] = useState<Screen>('auth-welcome')
   const [history, setHistory] = useState<Screen[]>([])
@@ -520,10 +1183,6 @@ function App() {
   const [weeklyOpen, setWeeklyOpen] = useState(false)
   const [connectOpen, setConnectOpen] = useState(false)
   const [demoConnections, setDemoConnections] = useState<string[]>([])
-  const [extensionStep, setExtensionStep] = useState(1)
-  const [recognizedVehicle, setRecognizedVehicle] = useState('2022 Toyota Camry')
-  const [recognizedPrice, setRecognizedPrice] = useState(21500)
-  const [extensionChoice, setExtensionChoice] = useState('Buy this car now')
   const profileTouchedRef = useRef(false)
   const recognitionRef = useRef<{
     start: () => void
@@ -594,12 +1253,6 @@ function App() {
     key: 'price' | 'down' | 'term' | 'apr' | 'insurance' | 'running' | 'fees',
     value: number,
   ) => setSim((s) => ({ ...s, [key]: value }))
-  const extensionScenario: SimulatorData = {
-    ...initialSimulator,
-    price: recognizedPrice,
-    running: 175,
-  }
-  const extensionDetails = loanDetails(extensionScenario)
   const cashFlow = finance.income - finance.housing - finance.expenses - finance.debt
   const remainingAfterCar = cashFlow - details.totalMonthly
   const savingsAfterUpfront = Math.max(finance.savings - details.upfront, 0)
@@ -2316,394 +2969,7 @@ function App() {
   }
 
   if (screen === 'extension') {
-    const fuel = 110
-    const maintenance = extensionScenario.running - fuel
-    const monthlyRoom = cashFlow - extensionDetails.totalMonthly
-    const savingsAfterPurchase = Math.max(finance.savings - extensionDetails.upfront, 0)
-    const extensionOptions = [
-      {
-        name: 'Buy this car now',
-        note: 'Get reliable transportation sooner.',
-        data: extensionScenario,
-        delay: 0,
-      },
-      {
-        name: 'Choose a lower-cost car',
-        note: 'Reduce the monthly commitment.',
-        data: { ...extensionScenario, price: Math.max(recognizedPrice - 3500, 5000) },
-        delay: 0,
-      },
-      {
-        name: 'Wait 3 months and save more',
-        note: 'Build a larger down payment first.',
-        data: { ...extensionScenario, down: extensionScenario.down + contribution * 3 },
-        delay: 3,
-      },
-    ]
-    const chooseExtensionOption = (name: string, data: SimulatorData) => {
-      setExtensionChoice(name)
-      setRecognizedPrice(data.price)
-      setExtensionStep(5)
-    }
-    return (
-      <div className="extension-host">
-        <aside className="extension-panel">
-          <header className="extension-header">
-            <div>
-              <span className="extension-logo">
-                <img src={fluxLogo} alt="" />
-              </span>
-              <div>
-                <strong>Flux Companion</strong>
-                <span>Chrome side panel</span>
-              </div>
-            </div>
-            <div className="extension-header-actions">
-              {extensionStep > 1 && (
-                <button
-                  onClick={() => setExtensionStep((step) => Math.max(step - 1, 1))}
-                  aria-label="Previous extension screen"
-                >
-                  <Icon name="back" size={17} />
-                </button>
-              )}
-              <button onClick={() => go('home')} aria-label="Close Flux Companion">
-                <span className="close-mark">×</span>
-              </button>
-            </div>
-          </header>
-
-          {extensionStep === 1 && (
-            <div className="extension-welcome">
-              <div className="extension-welcome-art">
-                <span className="browser-window">
-                  <i />
-                  <i />
-                  <i />
-                  <span className="browser-listing">
-                    <img className="browser-flux-mark" src={fluxLogo} alt="" />
-                  </span>
-                </span>
-                <span className="companion-badge">
-                  <img src={fluxLogo} alt="" />
-                </span>
-              </div>
-              <span className="extension-kicker">Context for your next move</span>
-              <h1>Flux Companion</h1>
-              <p className="extension-tagline">Your finances, moving toward what matters.</p>
-              <p className="extension-body">
-                On a car listing, click the Flux extension icon to open this panel. This demo
-                focuses only on car listings and never opens automatically.
-              </p>
-              <div className="extension-demo-note">
-                <Icon name="shield" size={17} />
-                <span>
-                  <strong>You choose when Flux analyzes a page</strong>
-                  Flux does not scan links automatically. This demo uses example financial data.
-                </span>
-              </div>
-              <Button onClick={() => setExtensionStep(2)} icon="arrow">
-                Open Flux on This Page
-              </Button>
-            </div>
-          )}
-
-          {extensionStep === 2 && (
-            <div className="extension-content">
-              <div className="noticed-banner">
-                <span>
-                  <Icon name="spark" size={16} />
-                </span>
-                <div>
-                  <strong>Want to see how this car could fit?</strong>
-                  <p>Flux only analyzes this page when you choose to.</p>
-                </div>
-              </div>
-              <div className="listing-preview">
-                <p className="permission-note">
-                  You opened Flux on this listing. Review or edit the details before continuing. If
-                  Flux cannot detect a price, you can enter it here.
-                </p>
-                <div className="listing-site-row">
-                  <span className="listing-site-icon">A</span>
-                  <div>
-                    <strong>AutoMarket</strong>
-                    <span>Vehicle listing · Demo</span>
-                  </div>
-                  <span className="listing-live">On this page</span>
-                </div>
-                <div className="listing-car-art">
-                  <span className="listing-year">2022</span>
-                  <Icon name="car" size={72} />
-                </div>
-                <label className="extension-field">
-                  <span>Vehicle</span>
-                  <input
-                    value={recognizedVehicle}
-                    onChange={(event) => setRecognizedVehicle(event.target.value)}
-                  />
-                </label>
-                <label className="extension-field">
-                  <span>Listed price</span>
-                  <span className="extension-price-input">
-                    <span>$</span>
-                    <input
-                      type="number"
-                      min="0"
-                      value={recognizedPrice}
-                      onChange={(event) => setRecognizedPrice(Number(event.target.value))}
-                    />
-                  </span>
-                </label>
-                <p className="listing-edit-note">
-                  <Icon name="edit" size={14} /> Edit anything Flux did not recognize correctly.
-                </p>
-              </div>
-              <div className="extension-profile-strip">
-                <span className="profile-mini">A</span>
-                <div>
-                  <strong>Compared with the example profile</strong>
-                  <span>
-                    Income − housing − other expenses − debt = {money(cashFlow)} monthly room
-                  </span>
-                </div>
-                <Icon name="check" size={17} />
-              </div>
-              <Button onClick={() => setExtensionStep(3)} icon="arrow">
-                Analyze This Decision
-              </Button>
-            </div>
-          )}
-
-          {extensionStep === 3 && (
-            <div className="extension-content">
-              <div className="extension-title">
-                <span className="extension-kicker">Financial Ripple Effect</span>
-                <h1>How could this decision affect your finances?</h1>
-                <p>
-                  See how this decision could change your monthly budget, savings, bills, and goal.
-                  Based on {recognizedVehicle} at {money(recognizedPrice)}.
-                </p>
-              </div>
-              <div className="extension-total-card">
-                <span>Estimated total monthly car cost</span>
-                <strong>
-                  {money(extensionDetails.totalMonthly)}
-                  <small>/month</small>
-                </strong>
-                <div className="extension-cost-grid">
-                  <div>
-                    <span>Loan</span>
-                    <strong>{money(extensionDetails.payment)}</strong>
-                  </div>
-                  <div>
-                    <span>Insurance</span>
-                    <strong>{money(extensionScenario.insurance)}</strong>
-                  </div>
-                  <div>
-                    <span>Fuel</span>
-                    <strong>{money(fuel)}</strong>
-                  </div>
-                  <div>
-                    <span>Maintenance</span>
-                    <strong>{money(maintenance)}</strong>
-                  </div>
-                </div>
-              </div>
-              <div className="extension-ripple-list">
-                <article>
-                  <span className="extension-ripple-icon sage">
-                    <Icon name="chart" />
-                  </span>
-                  <div>
-                    <span>Money left each month</span>
-                    <strong>
-                      {money(cashFlow)} → {money(monthlyRoom)} remaining
-                    </strong>
-                    <p>
-                      The full car cost would use about{' '}
-                      {Math.round((extensionDetails.totalMonthly / cashFlow) * 100)}% of your
-                      current monthly room.
-                    </p>
-                  </div>
-                </article>
-                <article>
-                  <span className="extension-ripple-icon peach">
-                    <Icon name="shield" />
-                  </span>
-                  <div>
-                    <span>Emergency savings</span>
-                    <strong>
-                      {money(finance.savings)} → {money(savingsAfterPurchase)}
-                    </strong>
-                    <p>After the estimated {money(extensionDetails.upfront)} upfront cost.</p>
-                  </div>
-                </article>
-                <article>
-                  <span className="extension-ripple-icon neutral">
-                    <Icon name="debt" />
-                  </span>
-                  <div>
-                    <span>Bills and debt payments</span>
-                    <strong>{money(finance.debt + extensionDetails.payment)}/month</strong>
-                    <p>Your current debt payments plus the estimated car loan.</p>
-                  </div>
-                </article>
-                <article>
-                  <span className="extension-ripple-icon sage">
-                    <Icon name="flag" />
-                  </span>
-                  <div>
-                    <span>Progress toward your goal</span>
-                    <strong>
-                      {monthlyRoom >= contribution ? 'Still moving forward' : 'May need more time'}
-                    </strong>
-                    <p>Your transportation goal moves forward, with less room for savings.</p>
-                  </div>
-                </article>
-              </div>
-              <div className="extension-explanation">
-                <Icon name="spark" size={18} />
-                <p>
-                  The loan payment is only part of the decision. After the full estimated cost,
-                  you’d have about <strong>{money(monthlyRoom)}</strong> left for savings and
-                  unexpected expenses.
-                </p>
-              </div>
-              <div className="extension-actions">
-                <Button onClick={() => setExtensionStep(4)} icon="arrow">
-                  Compare Ways Forward
-                </Button>
-                <Button variant="ghost" onClick={() => setExtensionStep(5)}>
-                  See Flux Insight
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {extensionStep === 4 && (
-            <div className="extension-content">
-              <div className="extension-title">
-                <span className="extension-kicker">Compare the tradeoffs</span>
-                <h1>You have a few ways forward.</h1>
-                <p>No single path is right for everyone. Choose what you want to prioritize.</p>
-              </div>
-              <div className="extension-option-list">
-                {extensionOptions.map((option, index) => {
-                  const optionDetails = loanDetails(option.data)
-                  const optionSavings =
-                    finance.savings + contribution * option.delay - optionDetails.upfront
-                  return (
-                    <article className={index === 1 ? 'recommended' : ''} key={option.name}>
-                      <div className="extension-option-top">
-                        <span>Option {String.fromCharCode(65 + index)}</span>
-                        {index === 1 && (
-                          <span className="extension-recommendation">More monthly room</span>
-                        )}
-                      </div>
-                      <h2>{option.name}</h2>
-                      <p>{option.note}</p>
-                      <div className="extension-option-cost">
-                        <strong>{money(optionDetails.totalMonthly)}</strong>
-                        <span>estimated / month</span>
-                      </div>
-                      <div className="extension-option-stats">
-                        <div>
-                          <span>Total interest</span>
-                          <strong>{money(optionDetails.interest)}</strong>
-                        </div>
-                        <div>
-                          <span>Upfront cost</span>
-                          <strong>{money(optionDetails.upfront)}</strong>
-                        </div>
-                        <div>
-                          <span>Goal effect</span>
-                          <strong>
-                            {optionSavings >= 0
-                              ? `${money(Math.max(optionSavings, 0))} cushion`
-                              : 'Uses full cushion'}
-                          </strong>
-                        </div>
-                      </div>
-                      <Button
-                        variant="secondary"
-                        onClick={() => chooseExtensionOption(option.name, option.data)}
-                        icon="arrow"
-                      >
-                        Review This Path
-                      </Button>
-                      <details className="extension-assumptions">
-                        <summary>View assumptions</summary>
-                        <ul>
-                          <li>Car price: {money(option.data.price)}</li>
-                          <li>
-                            APR: {option.data.apr}% and loan term: {option.data.term} months
-                          </li>
-                          <li>Current down payment: {money(extensionScenario.down)}</li>
-                          {option.delay > 0 && (
-                            <>
-                              <li>Monthly savings while waiting: {money(contribution)}</li>
-                              <li>Additional savings after 3 months: {money(contribution * 3)}</li>
-                              <li>Car price and APR assumed unchanged</li>
-                            </>
-                          )}
-                          {index === 1 && <li>Lower-cost car uses the same down payment</li>}
-                        </ul>
-                      </details>
-                    </article>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {extensionStep === 5 && (
-            <div className="extension-content extension-insight-screen">
-              <div className="extension-insight-mark">
-                <span>
-                  <Icon name="spark" size={26} />
-                </span>
-              </div>
-              <span className="extension-kicker">A thought from Flux</span>
-              <h1>Keep the whole picture in view.</h1>
-              <div className="extension-quote">
-                <p>
-                  “Getting reliable transportation is your priority. Based on the example numbers,
-                  <strong> {extensionChoice.toLowerCase()}</strong> changes both your monthly room
-                  and savings cushion. I would review those assumptions alongside the alternatives
-                  before deciding.”
-                </p>
-              </div>
-              <div className="extension-reason">
-                <span className="extension-ripple-icon sage">
-                  <Icon name="info" />
-                </span>
-                <div>
-                  <strong>Why Flux is showing this</strong>
-                  <p>
-                    The example profile leaves {money(cashFlow)} before a car. This is not linked
-                    bank data, and the result depends on the price, APR, down payment, and ownership
-                    costs shown above.
-                  </p>
-                </div>
-              </div>
-              <div className="extension-actions">
-                <Button onClick={() => setExtensionStep(4)}>Compare Another Option</Button>
-                <Button variant="secondary" onClick={() => go('ai')} icon="spark">
-                  Ask Flux a Question
-                </Button>
-                <Button variant="ghost" onClick={() => setExtensionStep(2)}>
-                  Return to the Listing
-                </Button>
-              </div>
-              <p className="extension-disclaimer">
-                Illustrative estimates only. Flux has not accessed or changed the listing.
-              </p>
-            </div>
-          )}
-        </aside>
-      </div>
-    )
+    return <FinancialCompanion finance={finance} onClose={() => go('compare')} />
   }
 
   if (screen === 'home') {
@@ -2960,13 +3226,7 @@ function App() {
           <Icon name="arrow" />
         </button>
         {purchaseGoal && (
-          <button
-            className="companion-entry"
-            onClick={() => {
-              setExtensionStep(1)
-              go('extension')
-            }}
-          >
+          <button className="companion-entry" onClick={() => go('extension')}>
             <span className="companion-entry-icon">
               <img src={fluxLogo} alt="" />
             </span>
@@ -3397,6 +3657,10 @@ function App() {
                     <Button
                       variant="secondary"
                       onClick={() => {
+                        if (i === 2) {
+                          go('extension')
+                          return
+                        }
                         setSim(comparison.input)
                         showToast(`${scenario.name} selected`)
                         go('simulator')
